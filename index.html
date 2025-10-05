@@ -1,0 +1,1112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Shrinking Overworld (Zero-Player)</title>
+<style>
+  :root {
+    color-scheme: dark;
+  }
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    margin: 0;
+    background: #0d0d0f;
+    color: #d8d8d8;
+    font-family: "Fira Mono", "Source Code Pro", monospace;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    background: #11131a;
+    border-bottom: 1px solid #20222c;
+  }
+  header label {
+    font-size: 0.85rem;
+    opacity: 0.8;
+  }
+  header input[type="text"] {
+    background: #1b1e27;
+    border: 1px solid #2c3140;
+    color: inherit;
+    padding: 0.25rem 0.4rem;
+    min-width: 10rem;
+  }
+  header button {
+    background: #262b3a;
+    border: 1px solid #3a4257;
+    color: inherit;
+    padding: 0.3rem 0.6rem;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.85rem;
+  }
+  header button.active {
+    background: #3a4260;
+    border-color: #566189;
+  }
+  header button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  main {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
+  #viewport {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: #0f1118;
+    position: relative;
+  }
+  canvas {
+    image-rendering: pixelated;
+    background: #000;
+    border: 1px solid #1b1f2a;
+    box-shadow: 0 0 0.75rem rgba(0,0,0,0.4);
+  }
+  aside {
+    width: 280px;
+    max-width: 100vw;
+    border-left: 1px solid #20222c;
+    background: #141621;
+    display: flex;
+    flex-direction: column;
+  }
+  #stats {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #1e202b;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  #entropy-bar {
+    width: 100%;
+    height: 0.75rem;
+    background: #20222c;
+    border: 1px solid #3a3e52;
+    margin-top: 0.4rem;
+    position: relative;
+  }
+  #entropy-bar span {
+    display: block;
+    height: 100%;
+    background: linear-gradient(90deg, #3aa35c, #c97e2e, #d94444);
+  }
+  #log {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    overflow-y: auto;
+    font-size: 0.8rem;
+  }
+  #log p {
+    margin: 0 0 0.35rem;
+    white-space: pre-wrap;
+  }
+  footer {
+    text-align: center;
+    padding: 0.4rem 0;
+    font-size: 0.7rem;
+    opacity: 0.5;
+  }
+</style>
+</head>
+<body>
+<header>
+  <label for="seed">Seed</label>
+  <input id="seed" type="text" placeholder="world-seed" />
+  <button id="new-seed">New Seed</button>
+  <button id="play-pause">Pause</button>
+  <div>
+    <button data-speed="1">×1</button>
+    <button data-speed="2">×2</button>
+    <button data-speed="4">×4</button>
+  </div>
+  <button id="save">Save</button>
+  <button id="load">Load</button>
+  <span id="status" style="margin-left:auto;font-size:0.75rem;opacity:0.65;"></span>
+</header>
+<main>
+  <section id="viewport">
+    <canvas id="game" width="320" height="180"></canvas>
+  </section>
+  <aside>
+    <div id="stats">
+      <div><strong>Hero</strong></div>
+      <div>HP: <span id="stat-hp">--</span></div>
+      <div>Stamina: <span id="stat-stamina">--</span></div>
+      <div>Hunger: <span id="stat-hunger">--</span></div>
+      <div>Mood: <span id="stat-mood">--</span></div>
+      <div>Cleared Shrines: <span id="stat-shrines">0</span></div>
+      <div>Entropy: <span id="stat-entropy">0%</span></div>
+      <div>Day Time: <span id="stat-daytime">--</span></div>
+      <div id="entropy-bar"><span style="width:0%"></span></div>
+    </div>
+    <div id="log"></div>
+  </aside>
+</main>
+<footer>
+  Shrinking Overworld (Zero-Player) — autonomous simulation. Pause, seed, speed, save, load.
+</footer>
+<script>
+/*
+How to Extend:
+- Implement onTick(world) to observe each simulation tick.
+- Implement onEnterTile(hero, tile) to hook hero movement events.
+- Implement onShrineCleared(shrine) to react when a shrine is cleared.
+- Implement applyEntropy(world, level) to add custom decay behaviors.
+*/
+(() => {
+  // ======================= UTIL =======================
+  const Util = {
+    clamp(v, min, max) {
+      return Math.max(min, Math.min(max, v));
+    },
+    lerp(a, b, t) {
+      return a + (b - a) * t;
+    },
+    choice(arr, rng) {
+      return arr[Math.floor(rng.next() * arr.length)];
+    },
+    shuffle(array, rng) {
+      for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(rng.next() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+      }
+      return array;
+    },
+    hexToRgb(hex) {
+      const parsed = hex.replace('#', '');
+      const bigint = parseInt(parsed, 16);
+      return {
+        r: (bigint >> 16) & 255,
+        g: (bigint >> 8) & 255,
+        b: bigint & 255,
+      };
+    },
+    rgbToHex({ r, g, b }) {
+      const toHex = (v) => {
+        const h = Util.clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0');
+        return h;
+      };
+      return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+    },
+    mixColor(rgb, target, amount) {
+      return {
+        r: rgb.r + (target.r - rgb.r) * amount,
+        g: rgb.g + (target.g - rgb.g) * amount,
+        b: rgb.b + (target.b - rgb.b) * amount,
+      };
+    },
+    toFixedPercent(value) {
+      return `${Math.round(value * 100)}%`;
+    },
+    supportsLocalStorage() {
+      try {
+        const testKey = '__storage_test__';
+        window.localStorage.setItem(testKey, '1');
+        window.localStorage.removeItem(testKey);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    },
+  };
+
+  // ======================= RNG =======================
+  const RNG = (() => {
+    function xmur3(str) {
+      let h = 1779033703 ^ str.length;
+      for (let i = 0; i < str.length; i++) {
+        h = Math.imul(h ^ str.charCodeAt(i), 3432918353);
+        h = (h << 13) | (h >>> 19);
+      }
+      return function() {
+        h = Math.imul(h ^ (h >>> 16), 2246822507);
+        h = Math.imul(h ^ (h >>> 13), 3266489909);
+        h ^= h >>> 16;
+        return h >>> 0;
+      };
+    }
+    function create(seedStr) {
+      const seedFunc = xmur3(seedStr);
+      const state = {
+        a: seedFunc(),
+        b: seedFunc(),
+        c: seedFunc(),
+        d: seedFunc(),
+      };
+      return generator(state);
+    }
+    function fromState(state) {
+      return generator({ ...state });
+    }
+    function generator(state) {
+      return {
+        state,
+        next() {
+          // sfc32
+          state.a >>>= 0; state.b >>>= 0; state.c >>>= 0; state.d >>>= 0;
+          const t = (state.a + state.b) | 0;
+          state.a = state.b ^ (state.b >>> 9);
+          state.b = (state.c + (state.c << 3)) | 0;
+          state.c = (state.c << 21) | (state.c >>> 11);
+          state.d = (state.d + 1) | 0;
+          const r = (t + state.d) | 0;
+          state.c = (state.c + t) | 0;
+          return (r >>> 0) / 4294967296;
+        },
+        serialize() {
+          return { ...state };
+        },
+      };
+    }
+    return { create, fromState };
+  })();
+
+  // ======================= NOISE =======================
+  const Noise = (() => {
+    function valueNoise(x, y, offset) {
+      const n = Math.sin((x * 127.1 + y * 311.7 + offset) * 43758.5453);
+      return n - Math.floor(n);
+    }
+    function fbm(x, y, offset, octaves = 4) {
+      let value = 0;
+      let amplitude = 0.5;
+      let frequency = 1;
+      for (let i = 0; i < octaves; i++) {
+        value += amplitude * valueNoise(x * frequency, y * frequency, offset + i * 17.17);
+        amplitude *= 0.5;
+        frequency *= 2;
+      }
+      return value;
+    }
+    return { fbm };
+  })();
+
+  // ======================= CONSTANTS =======================
+  const TILE_TYPES = {
+    WATER: 'water',
+    FOREST: 'forest',
+    WILTED: 'wilted',
+    WASTELAND: 'wasteland',
+    MOUNTAIN: 'mountain',
+    PLAIN: 'plain',
+    TOWN: 'town',
+    SHRINE: 'shrine',
+    RUIN: 'ruin',
+  };
+
+  const BASE_COLORS = {
+    [TILE_TYPES.WATER]: Util.hexToRgb('#2d4da8'),
+    [TILE_TYPES.FOREST]: Util.hexToRgb('#2f8f4b'),
+    [TILE_TYPES.WILTED]: Util.hexToRgb('#5c7142'),
+    [TILE_TYPES.WASTELAND]: Util.hexToRgb('#6b4a3a'),
+    [TILE_TYPES.MOUNTAIN]: Util.hexToRgb('#8a8f9f'),
+    [TILE_TYPES.PLAIN]: Util.hexToRgb('#9ec45a'),
+    [TILE_TYPES.TOWN]: Util.hexToRgb('#d9b46b'),
+    [TILE_TYPES.SHRINE]: Util.hexToRgb('#c27bd1'),
+    [TILE_TYPES.RUIN]: Util.hexToRgb('#8a6f4b'),
+  };
+
+  const TILE_SIZE = 5;
+  const MAP_WIDTH = 64;
+  const MAP_HEIGHT = 36;
+  const DAY_LENGTH = 1200;
+
+  // ======================= MAP GENERATION =======================
+  const MapGen = (() => {
+    function generate(seed, rng) {
+      const tiles = new Array(MAP_WIDTH * MAP_HEIGHT);
+      const offsetA = rng.next() * 1000;
+      const offsetB = rng.next() * 2000 + 2000;
+      const passableTiles = [];
+
+      for (let y = 0; y < MAP_HEIGHT; y++) {
+        for (let x = 0; x < MAP_WIDTH; x++) {
+          const idx = x + y * MAP_WIDTH;
+          const nx = x / MAP_WIDTH - 0.5;
+          const ny = y / MAP_HEIGHT - 0.5;
+          const height = Noise.fbm(nx * 3, ny * 3, offsetA, 4);
+          const moisture = Noise.fbm(nx * 4 + 50, ny * 4 + 50, offsetB, 3);
+          let tileType;
+          if (height < 0.32) {
+            tileType = TILE_TYPES.WATER;
+          } else if (height > 0.78) {
+            tileType = TILE_TYPES.MOUNTAIN;
+          } else {
+            if (moisture > 0.58) {
+              tileType = TILE_TYPES.FOREST;
+            } else if (moisture < 0.28) {
+              tileType = TILE_TYPES.PLAIN;
+            } else {
+              tileType = rng.next() < 0.5 ? TILE_TYPES.FOREST : TILE_TYPES.PLAIN;
+            }
+          }
+          tiles[idx] = {
+            type: tileType,
+            explored: false,
+          };
+          if (tileType !== TILE_TYPES.WATER && tileType !== TILE_TYPES.MOUNTAIN) {
+            passableTiles.push({ x, y });
+          }
+        }
+      }
+
+      const towns = placeFeatures(rng, passableTiles, tiles, TILE_TYPES.TOWN, Util.choice([3,4,5], rng));
+      const shrines = placeFeatures(rng, passableTiles, tiles, TILE_TYPES.SHRINE, Util.choice([4,5,6], rng));
+      const ruins = placeFeatures(rng, passableTiles, tiles, TILE_TYPES.RUIN, Util.choice([3,4,5], rng));
+
+      return {
+        seed,
+        tiles,
+        towns,
+        shrines,
+        ruins,
+        width: MAP_WIDTH,
+        height: MAP_HEIGHT,
+        entropy: 0,
+        entropyStage: 0,
+        exploredTiles: 0,
+        time: 0,
+        paletteShift: 0,
+      };
+    }
+
+    function placeFeatures(rng, pool, tiles, type, count) {
+      const result = [];
+      const candidates = pool.slice();
+      Util.shuffle(candidates, rng);
+      for (let i = 0; i < count && candidates.length; i++) {
+        const spot = candidates.shift();
+        const idx = spot.x + spot.y * MAP_WIDTH;
+        tiles[idx] = {
+          type,
+          explored: false,
+        };
+        result.push({ x: spot.x, y: spot.y, cleared: false });
+        const poolIndex = pool.findIndex((p) => p.x === spot.x && p.y === spot.y);
+        if (poolIndex >= 0) {
+          pool.splice(poolIndex, 1);
+        }
+      }
+      return result;
+    }
+
+    return { generate };
+  })();
+
+  // ======================= PATHFINDING =======================
+  const Pathfinding = (() => {
+    function heuristic(a, b) {
+      return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+    }
+
+    function neighbors(x, y) {
+      return [
+        { x: x + 1, y },
+        { x: x - 1, y },
+        { x, y + 1 },
+        { x, y - 1 },
+      ];
+    }
+
+    function findPath(world, start, goal) {
+      if (start.x === goal.x && start.y === goal.y) {
+        return [start];
+      }
+      const width = world.width;
+      const height = world.height;
+      const open = [];
+      const gScore = new Map();
+      const fScore = new Map();
+      const cameFrom = new Map();
+      const startKey = `${start.x},${start.y}`;
+      gScore.set(startKey, 0);
+      fScore.set(startKey, heuristic(start, goal));
+      open.push({ pos: start, f: fScore.get(startKey) });
+
+      const closed = new Set();
+
+      while (open.length) {
+        open.sort((a, b) => a.f - b.f);
+        const current = open.shift();
+        const key = `${current.pos.x},${current.pos.y}`;
+        if (current.pos.x === goal.x && current.pos.y === goal.y) {
+          return reconstructPath(cameFrom, current.pos);
+        }
+        closed.add(key);
+        for (const n of neighbors(current.pos.x, current.pos.y)) {
+          if (n.x < 0 || n.y < 0 || n.x >= width || n.y >= height) continue;
+          const tile = world.tiles[n.x + n.y * width];
+          if (!isPassable(tile.type)) continue;
+          const neighborKey = `${n.x},${n.y}`;
+          if (closed.has(neighborKey)) continue;
+          const tentative = gScore.get(key) + 1;
+          if (!gScore.has(neighborKey) || tentative < gScore.get(neighborKey)) {
+            cameFrom.set(neighborKey, current.pos);
+            gScore.set(neighborKey, tentative);
+            const f = tentative + heuristic(n, goal);
+            fScore.set(neighborKey, f);
+            const existing = open.find((item) => item.pos.x === n.x && item.pos.y === n.y);
+            if (existing) {
+              existing.f = f;
+            } else {
+              open.push({ pos: { x: n.x, y: n.y }, f });
+            }
+          }
+        }
+      }
+      return null;
+    }
+
+    function reconstructPath(cameFrom, current) {
+      const totalPath = [current];
+      let key = `${current.x},${current.y}`;
+      while (cameFrom.has(key)) {
+        current = cameFrom.get(key);
+        key = `${current.x},${current.y}`;
+        totalPath.unshift(current);
+      }
+      return totalPath;
+    }
+
+    function isPassable(type) {
+      return type !== TILE_TYPES.WATER && type !== TILE_TYPES.MOUNTAIN;
+    }
+
+    return { findPath, isPassable };
+  })();
+
+  // ======================= ENTROPY =======================
+  const Entropy = (() => {
+    function increase(world, amount, rng, log) {
+      const prev = world.entropy;
+      world.entropy = Util.clamp(world.entropy + amount, 0, 100);
+      if (Math.floor(prev / 20) !== Math.floor(world.entropy / 20)) {
+        applyThreshold(world, rng, log);
+      }
+    }
+
+    function applyThreshold(world, rng, log) {
+      const level = Math.floor(world.entropy / 20);
+      world.entropyStage = level;
+      if (typeof window.applyEntropy === 'function') {
+        window.applyEntropy(world, level);
+      }
+      const forestIndexes = [];
+      const wiltedIndexes = [];
+      const plainIndexes = [];
+      for (let i = 0; i < world.tiles.length; i++) {
+        const type = world.tiles[i].type;
+        if (type === TILE_TYPES.FOREST) forestIndexes.push(i);
+        if (type === TILE_TYPES.WILTED) wiltedIndexes.push(i);
+        if (type === TILE_TYPES.PLAIN) plainIndexes.push(i);
+      }
+      const conversions = Math.max(5, Math.floor(world.tiles.length * 0.04));
+      if (level >= 1) {
+        mutateTiles(forestIndexes, TILE_TYPES.WILTED, conversions, world, rng);
+      }
+      if (level >= 2) {
+        mutateTiles(wiltedIndexes, TILE_TYPES.WASTELAND, conversions, world, rng);
+      }
+      if (level >= 3) {
+        mutateTiles(plainIndexes, TILE_TYPES.WILTED, Math.floor(conversions / 2), world, rng);
+      }
+      if (level >= 4) {
+        mutateTiles(forestIndexes.concat(plainIndexes), TILE_TYPES.WASTELAND, Math.floor(conversions / 2), world, rng);
+      }
+      world.paletteShift = Math.min(0.6, level * 0.12);
+      log(`Entropy surges to level ${level}. The world trembles.`);
+    }
+
+    function mutateTiles(indexes, targetType, count, world, rng) {
+      if (!indexes.length) return;
+      for (let i = 0; i < count; i++) {
+        const idx = indexes[Math.floor(rng.next() * indexes.length)];
+        if (idx == null) continue;
+        world.tiles[idx].type = targetType;
+      }
+    }
+
+    return { increase };
+  })();
+
+  // ======================= HERO AI =======================
+  const HeroAI = (() => {
+    function createHero(world) {
+      const home = world.towns[0] || { x: Math.floor(world.width / 2), y: Math.floor(world.height / 2) };
+      return {
+        x: home.x,
+        y: home.y,
+        displayX: home.x,
+        displayY: home.y,
+        hp: 0.9,
+        stamina: 0.9,
+        hunger: 0.7,
+        mood: 0.8,
+        moveProgress: 0,
+        moveSpeed: 0.22,
+        path: [],
+        goal: null,
+        restTimer: 0,
+        visitedShrines: {},
+        shrinesCleared: 0,
+        lastTile: `${home.x},${home.y}`,
+      };
+    }
+
+    function update(hero, world, rng, log) {
+      if (hero.restTimer > 0) {
+        hero.restTimer--;
+        recover(hero, world);
+        if (hero.restTimer === 0) {
+          log('Hero finishes resting at town.');
+        }
+      } else {
+        degrade(hero, world);
+      }
+
+      const tileIndex = hero.x + hero.y * world.width;
+      const tile = world.tiles[tileIndex];
+      if (tile && !tile.explored) {
+        tile.explored = true;
+        world.exploredTiles++;
+        Entropy.increase(world, 0.03, rng, log);
+      }
+
+      if (hero.path.length <= 1) {
+        chooseNewGoal(hero, world, rng, log);
+      }
+
+      if (hero.restTimer > 0) {
+        return;
+      }
+
+      moveAlongPath(hero, world, log, rng);
+
+      hero.displayX = Util.lerp(hero.displayX, hero.x, 0.4);
+      hero.displayY = Util.lerp(hero.displayY, hero.y, 0.4);
+    }
+
+    function degrade(hero, world) {
+      const fatigue = 0.002 + world.entropy * 0.00003;
+      hero.stamina = Util.clamp(hero.stamina - fatigue, 0, 1);
+      hero.hunger = Util.clamp(hero.hunger - 0.0015, 0, 1);
+      if (hero.hunger < 0.25) {
+        hero.hp = Util.clamp(hero.hp - 0.002, 0, 1);
+        hero.mood = Util.clamp(hero.mood - 0.001, 0, 1);
+      }
+    }
+
+    function recover(hero, world) {
+      const reduction = 0.02 * (1 - world.entropy * 0.004);
+      hero.stamina = Util.clamp(hero.stamina + reduction, 0, 1);
+      hero.hp = Util.clamp(hero.hp + reduction * 0.8, 0, 1);
+      hero.hunger = Util.clamp(hero.hunger + reduction * 0.4, 0, 1);
+      hero.mood = Util.clamp(hero.mood + reduction * 0.5, 0, 1);
+    }
+
+    function chooseNewGoal(hero, world, rng, log) {
+      const needsRest = hero.stamina < 0.35 || hero.hp < 0.4;
+      if (needsRest) {
+        const town = nearestPoint(hero, world.towns);
+        if (town) {
+          if (hero.x === town.x && hero.y === town.y) {
+            if (hero.restTimer === 0) {
+              hero.restTimer = 60;
+              log('Hero settles in town to recover.');
+            }
+            hero.goal = null;
+            hero.path = [{ x: hero.x, y: hero.y }];
+            return;
+          }
+          hero.goal = { ...town, type: 'town' };
+          computePath(hero, world, hero.goal, log);
+          return;
+        }
+      }
+      const shrine = nearestUnclearedShrine(hero, world);
+      if (shrine) {
+        hero.goal = { ...shrine, type: 'shrine' };
+        computePath(hero, world, hero.goal, log);
+        return;
+      }
+      const wanderTarget = selectWanderTarget(hero, world, rng);
+      if (wanderTarget) {
+        hero.goal = { ...wanderTarget, type: 'wander' };
+        computePath(hero, world, hero.goal, log);
+      }
+    }
+
+    function computePath(hero, world, goal, log) {
+      const start = { x: hero.x, y: hero.y };
+      const target = { x: goal.x, y: goal.y };
+      const path = Pathfinding.findPath(world, start, target);
+      if (!path || path.length === 0) {
+        hero.path = [start];
+        log('Hero is lost. Pathfinding failed.');
+      } else {
+        hero.path = path;
+        hero.moveProgress = 0;
+        if (goal.type === 'shrine') {
+          log(`Hero plots a course to shrine at (${goal.x}, ${goal.y}).`);
+        } else if (goal.type === 'town') {
+          log(`Hero seeks rest at town (${goal.x}, ${goal.y}).`);
+        }
+      }
+    }
+
+    function moveAlongPath(hero, world, log, rng) {
+      if (hero.path.length <= 1) return;
+      const [current, next] = [hero.path[0], hero.path[1]];
+      hero.moveProgress += hero.moveSpeed;
+      if (hero.moveProgress >= 1) {
+        hero.moveProgress = 0;
+        hero.path.shift();
+        hero.x = next.x;
+        hero.y = next.y;
+        const tileIndex = hero.x + hero.y * world.width;
+        const tile = world.tiles[tileIndex];
+        handleArrival(hero, tile, world, log, rng);
+      }
+    }
+
+    function handleArrival(hero, tile, world, log, rng) {
+      const tileKey = `${hero.x},${hero.y}`;
+      if (tileKey !== hero.lastTile) {
+        hero.lastTile = tileKey;
+        if (typeof window.onEnterTile === 'function') {
+          window.onEnterTile(hero, tile);
+        }
+      }
+      if (!tile) return;
+      switch (tile.type) {
+        case TILE_TYPES.TOWN:
+          if (hero.stamina < 0.8 || hero.hp < 0.8) {
+            hero.restTimer = 60;
+            log('Hero begins resting at a town.');
+          }
+          break;
+        case TILE_TYPES.SHRINE:
+          clearShrine(hero, world, log, rng);
+          break;
+        case TILE_TYPES.RUIN:
+          hero.mood = Util.clamp(hero.mood - 0.02, 0, 1);
+          log('Hero wanders through old ruins, feeling uneasy.');
+          break;
+        default:
+          break;
+      }
+    }
+
+    function clearShrine(hero, world, log, rng) {
+      const shrine = world.shrines.find((s) => s.x === hero.x && s.y === hero.y);
+      if (shrine && !shrine.cleared) {
+        shrine.cleared = true;
+        hero.visitedShrines[`${shrine.x},${shrine.y}`] = true;
+        hero.shrinesCleared += 1;
+        hero.mood = Util.clamp(hero.mood + 0.1, 0, 1);
+        Entropy.increase(world, 5, rng, log);
+        log(`Hero clears a shrine at (${shrine.x}, ${shrine.y}). Entropy swells.`);
+        if (typeof window.onShrineCleared === 'function') {
+          window.onShrineCleared(shrine);
+        }
+      }
+    }
+
+    function nearestPoint(hero, points) {
+      if (!points || !points.length) return null;
+      let best = null;
+      let bestDist = Infinity;
+      for (const p of points) {
+        const dist = Math.abs(p.x - hero.x) + Math.abs(p.y - hero.y);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = p;
+        }
+      }
+      return best;
+    }
+
+    function nearestUnclearedShrine(hero, world) {
+      const shrines = world.shrines.filter((s) => !s.cleared);
+      return nearestPoint(hero, shrines);
+    }
+
+    function selectWanderTarget(hero, world, rng) {
+      const options = [];
+      options.push(...world.towns);
+      options.push(...world.shrines);
+      options.push(...world.ruins);
+      for (let i = 0; i < world.tiles.length; i++) {
+        const tile = world.tiles[i];
+        if (tile.type === TILE_TYPES.PLAIN || tile.type === TILE_TYPES.FOREST) {
+          const x = i % world.width;
+          const y = Math.floor(i / world.width);
+          options.push({ x, y });
+        }
+      }
+      if (!options.length) return null;
+      return Util.choice(options, rng);
+    }
+
+    return { createHero, update };
+  })();
+
+  // ======================= RENDER =======================
+  const Render = (() => {
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+
+    function resize() {
+      const parent = canvas.parentElement;
+      const maxW = parent.clientWidth;
+      const maxH = parent.clientHeight;
+      const scale = Math.max(1, Math.floor(Math.min(maxW / canvas.width, maxH / canvas.height)));
+      canvas.style.width = `${canvas.width * scale}px`;
+      canvas.style.height = `${canvas.height * scale}px`;
+    }
+
+    window.addEventListener('resize', resize);
+    requestAnimationFrame(resize);
+
+    function draw(world, hero) {
+      if (!world || !hero) return;
+      const brightness = computeDayBrightness(world.time);
+      const entropyTint = world.paletteShift;
+      for (let y = 0; y < world.height; y++) {
+        for (let x = 0; x < world.width; x++) {
+          const tile = world.tiles[x + y * world.width];
+          const color = getTileColor(tile.type, brightness, entropyTint);
+          ctx.fillStyle = color;
+          ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+        }
+      }
+      drawHero(hero, world);
+      applyOverlays(world);
+    }
+
+    function computeDayBrightness(time) {
+      const t = (time % DAY_LENGTH) / DAY_LENGTH;
+      const cycle = Math.sin((t * Math.PI * 2) - Math.PI / 2) * 0.5 + 0.5;
+      return 0.4 + cycle * 0.6;
+    }
+
+    function getTileColor(type, brightness, entropyTint) {
+      const base = BASE_COLORS[type] || BASE_COLORS[TILE_TYPES.PLAIN];
+      const tinted = Util.mixColor(base, { r: 120, g: 110, b: 120 }, entropyTint);
+      const final = {
+        r: tinted.r * brightness,
+        g: tinted.g * brightness,
+        b: tinted.b * brightness,
+      };
+      return Util.rgbToHex(final);
+    }
+
+    function drawHero(hero, world) {
+      const px = hero.displayX * TILE_SIZE + TILE_SIZE / 2;
+      const py = hero.displayY * TILE_SIZE + TILE_SIZE / 2;
+      const frame = Math.floor((world.time / 10) % 2);
+      const colors = frame === 0 ? ['#ffe680', '#d95f5f'] : ['#f7d97a', '#c94f4f'];
+      ctx.fillStyle = colors[0];
+      ctx.fillRect(px - 1, py - 2, 3, 3);
+      ctx.fillStyle = colors[1];
+      ctx.fillRect(px - 1, py - 1, 3, 1);
+    }
+
+    function applyOverlays(world) {
+      const entropy = world.entropy / 100;
+      if (entropy > 0) {
+        ctx.fillStyle = `rgba(120, 40, 40, ${entropy * 0.25})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      const t = (world.time % DAY_LENGTH) / DAY_LENGTH;
+      const night = Math.cos(t * Math.PI * 2) * 0.5 + 0.5;
+      ctx.fillStyle = `rgba(10, 14, 30, ${night * 0.35})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    return { draw, resize };
+  })();
+
+  // ======================= UI =======================
+  const UI = (() => {
+    const seedInput = document.getElementById('seed');
+    const newSeedBtn = document.getElementById('new-seed');
+    const playPauseBtn = document.getElementById('play-pause');
+    const speedButtons = Array.from(document.querySelectorAll('[data-speed]'));
+    const entropyBar = document.querySelector('#entropy-bar span');
+    const statusLabel = document.getElementById('status');
+    const saveBtn = document.getElementById('save');
+    const loadBtn = document.getElementById('load');
+    const stats = {
+      hp: document.getElementById('stat-hp'),
+      stamina: document.getElementById('stat-stamina'),
+      hunger: document.getElementById('stat-hunger'),
+      mood: document.getElementById('stat-mood'),
+      shrines: document.getElementById('stat-shrines'),
+      entropy: document.getElementById('stat-entropy'),
+      daytime: document.getElementById('stat-daytime'),
+    };
+    const logPanel = document.getElementById('log');
+    let logEntries = [];
+
+    function bindEvents() {
+      newSeedBtn.addEventListener('click', () => {
+        const newSeed = seedInput.value.trim() || `seed-${Math.floor(Math.random() * 1e6)}`;
+        GameState.init(newSeed);
+      });
+      playPauseBtn.addEventListener('click', () => {
+        GameLoop.togglePause();
+        playPauseBtn.textContent = GameLoop.paused ? 'Play' : 'Pause';
+      });
+      speedButtons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const speed = Number(btn.dataset.speed);
+          GameLoop.setSpeed(speed);
+          speedButtons.forEach((b) => b.classList.toggle('active', b === btn));
+        });
+      });
+      if (!Util.supportsLocalStorage()) {
+        saveBtn.disabled = true;
+        loadBtn.disabled = true;
+        statusLabel.textContent = 'localStorage unavailable';
+      } else {
+        saveBtn.addEventListener('click', () => Persistence.save());
+        loadBtn.addEventListener('click', () => Persistence.load());
+      }
+    }
+
+    function setSeedValue(value) {
+      seedInput.value = value;
+    }
+
+    function updateStats(hero, world) {
+      if (!hero || !world) return;
+      stats.hp.textContent = Util.toFixedPercent(hero.hp);
+      stats.stamina.textContent = Util.toFixedPercent(hero.stamina);
+      stats.hunger.textContent = Util.toFixedPercent(hero.hunger);
+      stats.mood.textContent = Util.toFixedPercent(hero.mood);
+      stats.shrines.textContent = hero.shrinesCleared;
+      stats.entropy.textContent = `${world.entropy.toFixed(1)}%`;
+      entropyBar.style.width = `${world.entropy}%`;
+      const day = Math.floor(world.time / DAY_LENGTH) + 1;
+      const hour = Math.floor(((world.time % DAY_LENGTH) / DAY_LENGTH) * 24);
+      stats.daytime.textContent = `Day ${day}, ${hour}:00`;
+    }
+
+    function log(message) {
+      const timestamp = `T${GameState.world ? GameState.world.time : 0}`;
+      logEntries.push(`${timestamp} — ${message}`);
+      if (logEntries.length > 50) {
+        logEntries = logEntries.slice(logEntries.length - 50);
+      }
+      renderLog();
+    }
+
+    function renderLog() {
+      logPanel.innerHTML = '';
+      for (const entry of logEntries) {
+        const p = document.createElement('p');
+        p.textContent = entry;
+        logPanel.appendChild(p);
+      }
+      logPanel.scrollTop = logPanel.scrollHeight;
+    }
+
+    function setStatus(text) {
+      statusLabel.textContent = text;
+    }
+
+    function resetLog() {
+      logEntries = [];
+      logPanel.innerHTML = '';
+    }
+
+    bindEvents();
+    if (speedButtons[0]) speedButtons[0].classList.add('active');
+
+    return { log, updateStats, setSeedValue, setStatus, resetLog };
+  })();
+
+  // ======================= PERSISTENCE =======================
+  const Persistence = (() => {
+    const KEY = 'shrinking-overworld-save-v1';
+
+    function save() {
+      if (!Util.supportsLocalStorage()) return;
+      if (!GameState.world || !GameState.hero) return;
+      const payload = {
+        version: 1,
+        seed: GameState.seed,
+        worldState: serializeWorld(GameState.world),
+        heroState: GameState.hero,
+        entropy: GameState.world.entropy,
+        time: GameState.world.time,
+        rng: GameState.rng.serialize(),
+      };
+      window.localStorage.setItem(KEY, JSON.stringify(payload));
+      UI.setStatus('Saved');
+    }
+
+    function load() {
+      if (!Util.supportsLocalStorage()) return;
+      const data = window.localStorage.getItem(KEY);
+      if (!data) {
+        UI.setStatus('No save found');
+        return;
+      }
+      try {
+        const payload = JSON.parse(data);
+        if (payload.version !== 1) {
+          UI.setStatus('Save version mismatch');
+          return;
+        }
+        GameState.restore(payload);
+        UI.setStatus('Loaded');
+      } catch (err) {
+        console.error(err);
+        UI.setStatus('Failed to load');
+      }
+    }
+
+    function serializeWorld(world) {
+      return {
+        ...world,
+        tiles: world.tiles.map((t) => ({ type: t.type, explored: t.explored })),
+        towns: world.towns.map((t) => ({ ...t })),
+        shrines: world.shrines.map((s) => ({ ...s })),
+        ruins: world.ruins.map((r) => ({ ...r })),
+      };
+    }
+
+    return { save, load };
+  })();
+
+  // ======================= GAME STATE =======================
+  const GameState = {
+    seed: '',
+    rng: null,
+    world: null,
+    hero: null,
+    eventLog: null,
+    init(seed) {
+      this.seed = seed;
+      UI.setSeedValue(seed);
+      UI.resetLog();
+      window.location.hash = encodeURIComponent(seed);
+      this.rng = RNG.create(seed);
+      this.world = MapGen.generate(seed, RNG.create(`${seed}-map`));
+      this.hero = HeroAI.createHero(this.world);
+      this.eventLog = [];
+      UI.setStatus('');
+      UI.log(`World born from seed "${seed}".`);
+      UI.updateStats(this.hero, this.world);
+    },
+    restore(payload) {
+      this.seed = payload.seed;
+      UI.setSeedValue(payload.seed);
+      UI.resetLog();
+      window.location.hash = encodeURIComponent(payload.seed);
+      this.rng = RNG.fromState(payload.rng);
+      this.world = payload.worldState;
+      this.hero = payload.heroState;
+      if (this.hero) {
+        if (typeof this.hero.displayX !== 'number') this.hero.displayX = this.hero.x;
+        if (typeof this.hero.displayY !== 'number') this.hero.displayY = this.hero.y;
+      }
+      UI.log(`Save from seed "${this.seed}" restored.`);
+      UI.updateStats(this.hero, this.world);
+    },
+  };
+
+  // ======================= GAME LOOP =======================
+  const GameLoop = (() => {
+    const baseTicksPerSecond = 12;
+    let speed = 1;
+    let lastTime = performance.now();
+    let accumulator = 0;
+    let paused = false;
+
+    function setSpeed(multiplier) {
+      speed = multiplier;
+    }
+
+    function togglePause() {
+      paused = !paused;
+    }
+
+    function loop(now) {
+      const delta = (now - lastTime) / 1000;
+      lastTime = now;
+      if (!paused && GameState.world) {
+        accumulator += delta * speed * baseTicksPerSecond;
+        while (accumulator >= 1) {
+          tick();
+          accumulator -= 1;
+        }
+      }
+      render();
+      requestAnimationFrame(loop);
+    }
+
+    function tick() {
+      GameState.world.time += 1;
+      if (GameState.hero && GameState.world) {
+        HeroAI.update(GameState.hero, GameState.world, GameState.rng, UI.log);
+      }
+      if (typeof window.onTick === 'function') {
+        window.onTick(GameState.world);
+      }
+      Entropy.increase(GameState.world, 0.005, GameState.rng, UI.log);
+      UI.updateStats(GameState.hero, GameState.world);
+    }
+
+    function render() {
+      Render.draw(GameState.world, GameState.hero);
+    }
+
+    requestAnimationFrame(loop);
+
+    return {
+      setSpeed,
+      togglePause,
+      get paused() {
+        return paused;
+      },
+    };
+  })();
+
+  // ======================= BOOTSTRAP =======================
+  function bootstrap() {
+    const urlHashSeed = decodeURIComponent(window.location.hash.replace('#', ''));
+    const seed = urlHashSeed || `seed-${Math.floor(Math.random() * 1e6)}`;
+    GameState.init(seed);
+    Render.resize();
+    UI.setStatus('Ready');
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && !GameLoop.paused) {
+      GameLoop.togglePause();
+      const btn = document.getElementById('play-pause');
+      if (btn) btn.textContent = 'Play';
+    }
+  });
+
+  bootstrap();
+})();
+</script>
+</body>
+</html>
